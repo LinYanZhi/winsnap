@@ -93,34 +93,35 @@ fn find_window(pid: Option<u32>, title: Option<&str>) -> Option<WinInfo> {
     None
 }
 
-fn compute(align: &str, wa: (i32, i32, i32, i32), scale: f64, gap: i32) -> (i32, i32, i32, i32) {
+fn compute(align: &str, wa: (i32, i32, i32, i32), scale: f64, gap: i32, off: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
     let (wx, wy, ww, wh) = wa;
-    let g = gap;
-    let w = ww - g * 2;
-    let h = wh - g * 2;
-    let (mut x, mut y, mut cw, mut ch) = (wx + g, wy + g, w, h);
+    let (lo, to, ro, bo) = off;
+    // 与 winsnap 滚轮一致：按「内容(visual)」计算，frame = visual + DWM 不可见边框
+    let (mut vx, mut vy, mut vw, mut vh) = (wx + gap, wy + gap, ww - gap * 2, wh - gap * 2);
     match align {
-        "left" => cw = (w as f64 * 0.5) as i32,
-        "right" => { cw = (w as f64 * 0.5) as i32; x = wx + g + (w - cw); }
-        "left-edge" => cw = (w as f64 * 0.25) as i32,
-        "right-edge" => { cw = (w as f64 * 0.25) as i32; x = wx + g + (w - cw); }
+        "left" => vw = (vw as f64 * 0.5) as i32,
+        "right" => { vw = (vw as f64 * 0.5) as i32; vx = wx + gap + ((ww - gap * 2) - vw); }
+        "left-edge" => vw = (vw as f64 * 0.25) as i32,
+        "right-edge" => { vw = (vw as f64 * 0.25) as i32; vx = wx + gap + ((ww - gap * 2) - vw); }
         "center" => {
             let r = if scale > 0.0 { scale } else { 0.7 };
-            cw = (w as f64 * r) as i32;
-            ch = (h as f64 * r) as i32;
-            x = wx + g + (w - cw) / 2;
-            y = wy + g + (h - ch) / 2;
+            vw = (vw as f64 * r) as i32;
+            vh = (vh as f64 * r) as i32;
+            vx = wx + gap + ((ww - gap * 2) - vw) / 2;
+            vy = wy + gap + ((wh - gap * 2) - vh) / 2;
         }
         "proportional" => {
+            // 内容 = 工作区 × scale（无 gap，与 winsnap 滚轮 100%×0.9 完全一致），frame 加 DWM 边框
             let s = if scale > 0.0 { scale } else { 0.8 };
-            cw = (w as f64 * s) as i32;
-            ch = (h as f64 * s) as i32;
-            x = wx + g + (w - cw) / 2;
-            y = wy + g + (h - ch) / 2;
+            vw = (ww as f64 * s) as i32;
+            vh = (wh as f64 * s) as i32;
+            vx = wx + (ww - vw) / 2;
+            vy = wy + (wh - vh) / 2;
         }
-        _ => {} // full
+        _ => {}
     }
-    (x, y, cw, ch)
+    // 映射回窗口 frame（visual + DWM 不可见边框）
+    (vx - lo, vy - to, vw + lo + ro, vh + to + bo)
 }
 
 pub fn run(args: &[String]) -> i32 {
@@ -171,7 +172,8 @@ pub fn run(args: &[String]) -> i32 {
                 }
             }
             let wa = cfg::get_monitor_work_area(hwnd);
-            let (x, y, cw, ch) = compute(align, wa, scale, gap);
+            let off = cfg::get_dwm_frame_offsets(hwnd);
+            let (x, y, cw, ch) = compute(align, wa, scale, gap, off);
             let ok = cfg::move_window_to(hwnd, x, y) && cfg::set_window_pos(hwnd, x, y, cw, ch);
             println!("{{\"hwnd\":\"{:X}\",\"pid\":{},\"title\":{},\"align\":\"{}\",\"rect\":{{\"x\":{x},\"y\":{y},\"w\":{cw},\"h\":{ch}}},\"ok\":{ok}}}",
                 w.hwnd, w.pid, serde_json_title(&w.title), align);
