@@ -19,6 +19,7 @@
 
 mod anim;
 mod autostart;
+mod cmd;
 mod config;
 mod keyboard;
 mod log;
@@ -78,6 +79,17 @@ fn main() {
         };
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
+
+    // CLI 一次性命令模式（供 AI/脚本调用窗口控制）——不启动托盘/交互，用完即退
+    let cli_args: Vec<String> = std::env::args().collect();
+    if cli_args.iter().any(|a| a == "--cmd") {
+        unsafe {
+            use windows::Win32::System::Console::AttachConsole;
+            let _ = AttachConsole(windows::Win32::System::Console::ATTACH_PARENT_PROCESS);
+        }
+        std::process::exit(crate::cmd::run(&cli_args));
+    }
+
     // 提高系统定时器分辨率到 1ms，保证动画 sleep 帧间隔精确均匀（进程退出时系统自动恢复）
     unsafe { let _ = timeBeginPeriod(1); }
 
