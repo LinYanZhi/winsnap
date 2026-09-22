@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindowVisible, GA_ROOT,
+    IsIconic, IsWindowVisible, ShowWindow, SW_RESTORE, GA_ROOT,
 };
 
 use crate::config as cfg;
@@ -80,7 +80,8 @@ fn find_window(pid: Option<u32>, title: Option<&str>) -> Option<WinInfo> {
             && !matches!(w.title.as_str(), "还原页面" | "Restore pages" | "新标签页" | "New Tab")
     };
     if let Some(p) = pid {
-        let cands: Vec<&WinInfo> = wins.iter().filter(|w| w.pid == p && w.w > 50 && w.h > 50).collect();
+        // 按 pid 找：不滤尺寸（最小化窗口可能 <50px），用 meaningful（有标题）优先
+        let cands: Vec<&WinInfo> = wins.iter().filter(|w| w.pid == p).collect();
         let good: Vec<&WinInfo> = cands.iter().copied().filter(|w| meaningful(w)).collect();
         let pool = if good.is_empty() { cands } else { good };
         return pool.into_iter().max_by_key(|w| w.w * w.h).map(|w| w.clone());
@@ -162,11 +163,28 @@ pub fn run(args: &[String]) -> i32 {
                 Some(w) => w,
                 None => { eprintln!("window not found (pid={pid:?} title={title:?})"); return 2; }
             };
-            let wa = cfg::get_monitor_work_area(HWND(w.hwnd as *mut core::ffi::c_void));
+            let hwnd = HWND(w.hwnd as *mut core::ffi::c_void);
+            // 最小化的窗口先还原，再摆位
+            unsafe {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+            }
+            let wa = cfg::get_monitor_work_area(hwnd);
             let (x, y, cw, ch) = compute(align, wa, scale, gap);
-            let ok = cfg::move_window_to(HWND(w.hwnd as *mut core::ffi::c_void), x, y) && cfg::set_window_pos(HWND(w.hwnd as *mut core::ffi::c_void), x, y, cw, ch);
+            let ok = cfg::move_window_to(hwnd, x, y) && cfg::set_window_pos(hwnd, x, y, cw, ch);
             println!("{{\"hwnd\":\"{:X}\",\"pid\":{},\"title\":{},\"align\":\"{}\",\"rect\":{{\"x\":{x},\"y\":{y},\"w\":{cw},\"h\":{ch}}},\"ok\":{ok}}}",
                 w.hwnd, w.pid, serde_json_title(&w.title), align);
+            0
+        }
+        "restore" => {
+            let w = match find_window(pid, title) {
+                Some(w) => w,
+                None => { eprintln!("window not found (pid={pid:?} title={title:?})"); return 2; }
+            };
+            let hwnd = HWND(w.hwnd as *mut core::ffi::c_void);
+            unsafe { let _ = ShowWindow(hwnd, SW_RESTORE); }
+            println!("{{\"hwnd\":\"{:X}\",\"pid\":{},\"restored\":true}}", w.hwnd, w.pid);
             0
         }
         _ => {
