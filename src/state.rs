@@ -74,3 +74,45 @@ pub fn is_right_down() -> bool {
         }
     }
 }
+
+// ── 置顶窗口追踪（供托盘二级菜单展示 + 失效清理） ──
+//
+// 不持久化（winsnap 关闭即清空）；存 isize 而非 HWND（HWND 非 Send/Sync，
+// 静态集合存裸指针值，用时重建 HWND）。Vec 而非 HashSet 是因为 HashSet::new
+// 不是 const fn（rustc 1.97），窗口数 < 50 时 Vec 的 O(n) 查找完全够用。
+
+use std::sync::Mutex;
+use windows::Win32::Foundation::HWND;
+
+/// 当前被置顶的窗口列表（用户视角的"置顶列表"）
+pub static TOPMOST_HWNDS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+
+/// 标记 hwnd 为置顶（加入追踪列表，已存在则跳过）
+pub fn track_topmost(hwnd: HWND) {
+    let h = hwnd.0 as isize;
+    let mut v = TOPMOST_HWNDS.lock().unwrap();
+    if !v.contains(&h) {
+        v.push(h);
+    }
+}
+
+/// 取消标记（从追踪列表移除）
+pub fn untrack_topmost(hwnd: HWND) {
+    let h = hwnd.0 as isize;
+    TOPMOST_HWNDS.lock().unwrap().retain(|&x| x != h);
+}
+
+/// 当前置顶窗口数
+pub fn topmost_count() -> usize {
+    TOPMOST_HWNDS.lock().unwrap().len()
+}
+
+/// 看门狗调用：清理已关闭的窗口句柄（IsWindow 返回 false）
+/// 返回清理的数量（用于日志）
+pub fn cleanup_stale_topmost() -> usize {
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+    let mut v = TOPMOST_HWNDS.lock().unwrap();
+    let before = v.len();
+    v.retain(|&h| unsafe { IsWindow(HWND(h as *mut _)).as_bool() });
+    before - v.len()
+}

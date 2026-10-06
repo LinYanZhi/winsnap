@@ -8,6 +8,9 @@ use crate::tray::WM_TRAY_RESTORE;
 /// 单例控制：首次运行 → 记录 PID 返回 true；已有实例 → 先判断其托盘是否健康：
 /// 健康则请其重建托盘图标并等待确认（确认后本实例退出），
 /// 不健康则终止旧进程接管；无法接管则本实例退出。
+///
+/// **孤儿 mutex 接管**：Windows 命名 mutex 偶尔会有孤儿（持有者进程死了但 mutex 名仍占着），
+/// 此时 GetLastError() == ERROR_ALREADY_EXISTS 但找不到任何旧实例痕迹——接管当作首次运行。
 pub fn ensure_single_instance() -> bool {
     unsafe {
         use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
@@ -26,15 +29,17 @@ pub fn ensure_single_instance() -> bool {
                 Ok(h) => h,
                 Err(_) => HWND::default(),
             };
+            let mut found_real_old_instance = false;
             if !old_hwnd.0.is_null() {
                 if let Some((tid, old_pid)) = window_thread_pid(old_hwnd) {
+                    found_real_old_instance = true;
                     if !thread_is_alive(tid) {
                         // 窗口所属线程已死 → 旧实例托盘已失效，直接终止旧进程接管
                         if process_is_winsnap(old_pid) {
                             return take_over(handle, old_pid);
                         }
                     } else {
-                        // 线程还活着 → 发消息请它重建托盘图标并等待确认。
+                        // 线程还活着 → 发消息请其重建托盘图标并等待确认。
                         // 消息泵卡死则超时无响应，此时终止旧进程接管。
                         if request_restore_and_wait(old_hwnd) {
                             let _: core::result::Result<(), _> = CloseHandle(handle);
@@ -50,14 +55,25 @@ pub fn ensure_single_instance() -> bool {
             // 托盘窗口找不到或无法确认 → 依次尝试 pid 文件、进程快照定位旧实例
             if let Some(old_pid) = read_runtime_pid() {
                 if process_is_winsnap(old_pid) {
+                    found_real_old_instance = true;
                     return take_over(handle, old_pid);
                 }
             }
             if let Some(old_pid) = find_winsnap_process() {
                 if old_pid != std::process::id() {
+                    found_real_old_instance = true;
                     return take_over(handle, old_pid);
                 }
             }
+
+            // 孤儿 mutex（Windows 命名对象空间已知行为）：旧进程已死但 mutex 名仍占着。
+            // 找不到任何旧实例（没托盘窗口 + pid 文件无效 + 没 winsnap 进程），接管当作首次运行。
+            if !found_real_old_instance {
+                let _: core::result::Result<(), _> = CloseHandle(handle);
+                write_runtime_pid();
+                return true;
+            }
+
             let _: core::result::Result<(), _> = CloseHandle(handle);
             eprintln!("winsnap: 已有实例在运行且无法接管，本实例退出");
             return false;
@@ -159,7 +175,7 @@ fn find_winsnap_process() -> Option<u32> {
             Err(_) => return None,
         };
         let mut entry = PROCESSENTRY32W {
-            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            dwSize: std::mem::size_of::<PROCESSENTRY32W> as u32,
             ..Default::default()
         };
         let mut found = None;

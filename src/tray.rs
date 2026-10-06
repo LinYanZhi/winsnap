@@ -18,11 +18,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BringWindowToTop, CallNextHookEx, CreateIconIndirect, CreatePopupMenu,
     CreateWindowExW, CS_HREDRAW, DefWindowProcW, DestroyIcon, DestroyMenu, DispatchMessageW,
     EnumWindows, GetIconInfo, GetMessageW, GetWindowLongPtrW, GWL_STYLE, HCURSOR, HHOOK, HICON,
-    ICONINFO, IDI_APPLICATION, IDI_WINLOGO, IsWindowVisible, LoadIconW, MF_CHECKED, MF_SEPARATOR,
-    MF_STRING, MSG, PostMessageW, RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow,
-    SetWindowsHookExW, ShowWindow, SW_HIDE, SW_SHOW, TrackPopupMenu, TranslateMessage,
-    TPM_RIGHTBUTTON, WM_APP, WM_COMMAND, WM_NULL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WNDCLASSEXW, WS_CAPTION, GetDesktopWindow,
+    HMENU, ICONINFO, IDI_APPLICATION, IDI_WINLOGO, IsWindowVisible, LoadIconW, MF_CHECKED,
+    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassExW,
+    RegisterWindowMessageW, SetForegroundWindow, SetWindowsHookExW, ShowWindow, SW_HIDE, SW_SHOW,
+    TrackPopupMenu, TranslateMessage, TPM_RIGHTBUTTON, WM_APP, WM_COMMAND, WM_NULL, WH_MOUSE_LL,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW, WS_CAPTION, GetDesktopWindow,
 };
 
 use crate::anim::ANIMATE_ENABLED;
@@ -30,8 +30,8 @@ use crate::autostart::is_auto_start_enabled;
 use crate::log::{c, CLR_FAIL, CLR_INTERACT, CLR_PAUSE, CLR_POSITION, CLR_RESUME, CLR_SCALE, CLR_SUCCESS, CLR_TIP};
 use crate::snap::{SNAP_SCREEN_ENABLED, SNAP_WINDOW_ENABLED};
 use crate::state::{
-    is_alt_held, HOOK_DRAG_REQUEST, HOOK_HANDLE, HOOK_INSTALLED, HOOK_PAUSED,
-    MOUSE_LEFT_HOOK, MOUSE_RIGHT_HOOK,
+    cleanup_stale_topmost, is_alt_held, topmost_count, HOOK_DRAG_REQUEST, HOOK_HANDLE,
+    HOOK_INSTALLED, HOOK_PAUSED, MOUSE_LEFT_HOOK, MOUSE_RIGHT_HOOK,
 };
 use crate::config as cfg;
 
@@ -56,6 +56,13 @@ const ID_TRAY_EXIT: u16 = 1001;
 const ID_TRAY_ANIMATE: u16 = 1004;
 const ID_TRAY_SNAP_SCREEN: u16 = 1005;
 const ID_TRAY_SNAP_WINDOW: u16 = 1006;
+const ID_TRAY_TOPMOST_UNCHECKALL: u16 = 1011; // 一键清空所有置顶
+const ID_TRAY_WIN_BASE: u32 = 10000; // 二级菜单项基址（窗口索引 + 10000）
+const MENU_MAX_ITEMS: usize = 30; // 二级菜单项数上限（避免菜单过长）
+
+/// 当前打开的"窗口置顶"二级菜单里的 hwnd 列表（按菜单项顺序）
+/// 菜单点击事件 WM_COMMAND 通过 (id - ID_TRAY_WIN_BASE) 索引到此列表取出 hwnd
+static MENU_WINDOW_HWNDS: std::sync::Mutex<Vec<isize>> = std::sync::Mutex::new(Vec::new());
 
 /// 启动托盘图标线程（隐藏窗口 + 消息循环）
 pub fn spawn_tray() {
@@ -201,6 +208,12 @@ pub fn spawn_tray_watchdog() {
                 if Shell_NotifyIconGetRect(&nid).is_err() {
                     let _ = PostMessageW(hwnd, WM_TRAY_RESTORE, WPARAM(0), LPARAM(0));
                 }
+                // 清理已关闭的置顶窗口句柄（用户关掉的窗口不再出现在二级菜单里）
+                let stale = cleanup_stale_topmost();
+                if stale > 0 {
+                    println!("[{}] {} 清理 {} 个失效的置顶窗口句柄",
+                        crate::log::now(), c("[TOPMOST]", CLR_INTERACT), stale);
+                }
             }
         }
     });
@@ -260,6 +273,34 @@ unsafe extern "system" fn tray_wnd_proc(
                             if let Err(e) = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()) {
                                 eprintln!("AppendMenuW 失败: {e}");
                             }
+                            // ── 窗口置顶（MF_POPUP 子菜单：枚举所有可见窗口 + 置顶状态勾选） ──
+                            let topmost_sub = build_topmost_submenu();
+                            if let Ok(sub) = topmost_sub {
+                                let label = format!("窗口置顶 ({})\0", topmost_count());
+                                let label_w = label.encode_utf16().collect::<Vec<u16>>();
+                                if let Err(e) = AppendMenuW(
+                                    menu,
+                                    MF_POPUP,
+                                    sub.0 as usize,
+                                    PCWSTR(label_w.as_ptr()),
+                                ) {
+                                    eprintln!("AppendMenuW 失败: {e}");
+                                }
+                            }
+                            // 全部取消置顶（仅当有置顶窗口时显示）
+                            if topmost_count() > 0 {
+                                if let Err(e) = AppendMenuW(
+                                    menu,
+                                    MF_STRING,
+                                    ID_TRAY_TOPMOST_UNCHECKALL as usize,
+                                    w!("全部取消置顶"),
+                                ) {
+                                    eprintln!("AppendMenuW 失败: {e}");
+                                }
+                            }
+                            if let Err(e) = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()) {
+                                eprintln!("AppendMenuW 失败: {e}");
+                            }
                             if let Err(e) = AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT as usize, w!("退出")) {
                                 eprintln!("AppendMenuW 失败: {e}");
                             }
@@ -270,6 +311,10 @@ unsafe extern "system" fn tray_wnd_proc(
                             let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, x, y, 0, hwnd, None);
                             // TrackPopupMenu 返回后菜单已关闭，句柄失效
                             CURRENT_MENU.store(0, Ordering::Relaxed);
+                            // 清空本菜单的窗口句柄列表（避免下次菜单构建前残留）
+                            if let Ok(mut hwnds) = MENU_WINDOW_HWNDS.lock() {
+                                hwnds.clear();
+                            }
                             let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
                             let _ = DestroyMenu(menu);
                         }
@@ -332,6 +377,39 @@ unsafe extern "system" fn tray_wnd_proc(
                 } else if id == ID_TRAY_EXIT as u32 {
                     println!("{}", c("程序通过托盘菜单退出", CLR_FAIL));
                     std::process::exit(0);
+                } else if id == ID_TRAY_TOPMOST_UNCHECKALL as u32 {
+                    // 一键清空所有置顶（遍历追踪集合反向操作）
+                    let set = crate::state::TOPMOST_HWNDS.lock().unwrap();
+                    let snapshot: Vec<isize> = set.iter().copied().collect();
+                    drop(set);
+                    let count = snapshot.len();
+                    for h in snapshot {
+                        let hwnd = HWND(h as *mut std::ffi::c_void);
+                        cfg::set_topmost(hwnd, false);
+                    }
+                    if count > 0 {
+                        println!("{} 已取消 {} 个窗口的置顶", c("[TOPMOST]", CLR_INTERACT), count);
+                    }
+                    return LRESULT(0);
+                } else if id >= ID_TRAY_WIN_BASE {
+                    // 二级菜单项：toggle 对应窗口置顶。
+                    // 每次点击**重新枚举**所有可见窗口（避免 MENU_WINDOW_HWNDS 缓存与锁竞争问题）
+                    let idx = (id - ID_TRAY_WIN_BASE) as usize;
+                    let wins = cfg::enum_visible_windows();
+                    if idx < wins.len() {
+                        let w = &wins[idx];
+                        let hwnd = HWND(w.hwnd as *mut std::ffi::c_void);
+                        let currently = cfg::is_topmost(hwnd);
+                        if cfg::set_topmost(hwnd, !currently) {
+                            let state = if !currently { c("已置顶", CLR_SUCCESS) } else { c("取消置顶", CLR_PAUSE) };
+                            let pn = cfg::get_process_name(hwnd);
+                            let title = cfg::get_window_title(hwnd);
+                            println!("[{}] {} 托盘菜单切换置顶: {} [{}] → {}",
+                                crate::log::now(), c("[TOPMOST]", CLR_INTERACT),
+                                c(&format!("[{pn}]"), CLR_POSITION), title, state);
+                        }
+                    }
+                    return LRESULT(0);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -693,4 +771,45 @@ unsafe extern "system" fn low_level_mouse_proc(
     }
     let hhk = HHOOK(HOOK_HANDLE.load(Ordering::Relaxed) as *mut std::ffi::c_void);
     unsafe { CallNextHookEx(hhk, code, wparam, lparam) }
+}
+
+/// 构建"窗口置顶"二级菜单：枚举所有可见窗口 + 置顶状态勾选 + MF_POPUP 嵌入父菜单
+/// 同时写入 MENU_WINDOW_HWNDS（与菜单项 ID 一一对应），供 WM_COMMAND 通过 ID 索引取 hwnd
+fn build_topmost_submenu() -> Result<HMENU, windows::core::Error> {
+    unsafe {
+        let sub = CreatePopupMenu()?;
+        let wins = cfg::enum_visible_windows();
+        let mut hwnds = MENU_WINDOW_HWNDS.lock().unwrap();
+        hwnds.clear();
+        let total = wins.len();
+        let shown = total.min(MENU_MAX_ITEMS);
+        for (i, w) in wins.iter().take(shown).enumerate() {
+            hwnds.push(w.hwnd);
+            // 格式：[进程名] 窗口标题——进程名作前缀方便区分同名标题的多个窗口
+            let label = format!("[{}] {}\0", w.process, w.title);
+            let label_w = label.encode_utf16().collect::<Vec<u16>>();
+            let flags = if w.topmost { MF_STRING | MF_CHECKED } else { MF_STRING };
+            if let Err(e) = AppendMenuW(
+                sub,
+                flags,
+                (ID_TRAY_WIN_BASE + i as u32) as usize,
+                PCWSTR(label_w.as_ptr()),
+            ) {
+                eprintln!("AppendMenuW 失败: {e}");
+            }
+        }
+        if total > MENU_MAX_ITEMS {
+            // 超出上限：分隔符 + "还有 N 项未显示"（灰色不可点）
+            let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+            let more = format!("还有 {} 项未显示\0", total - MENU_MAX_ITEMS);
+            let more_w = more.encode_utf16().collect::<Vec<u16>>();
+            let _ = AppendMenuW(
+                sub,
+                MF_STRING | MF_GRAYED,
+                0,
+                PCWSTR(more_w.as_ptr()),
+            );
+        }
+        Ok(sub)
+    }
 }

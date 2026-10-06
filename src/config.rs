@@ -446,7 +446,8 @@ pub fn is_topmost(hwnd: HWND) -> bool {
     }
 }
 
-/// 设置窗口置顶（on=true）/取消置顶（on=false）；目标线程挂起时返回 false 跳过
+/// 设置窗口置顶（on=true）/取消置顶（on=false）；目标线程挂起时返回 false 跳过。
+/// 成功后同步追踪集合（topmost on 加入 / off 移除），供托盘二级菜单展示。
 pub fn set_topmost(hwnd: HWND, on: bool) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
         SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
@@ -454,14 +455,86 @@ pub fn set_topmost(hwnd: HWND, on: bool) -> bool {
     if !window_responding(hwnd, 100) {
         return false;
     }
-    unsafe {
+    let ok = unsafe {
         SetWindowPos(
             hwnd,
             if on { HWND_TOPMOST } else { HWND_NOTOPMOST },
             0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE,
         ).is_ok()
+    };
+    if ok {
+        if on {
+            crate::state::track_topmost(hwnd);
+        } else {
+            crate::state::untrack_topmost(hwnd);
+        }
     }
+    ok
+}
+
+/// 枚举当前所有可见顶层窗口（含置顶状态、标题、进程名），供托盘二级菜单展示。
+/// 跳过无标题/极小尺寸的窗口（托盘图标、工具窗口）。
+pub fn enum_visible_windows() -> Vec<WindowInfo> {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetAncestor, GetWindowTextW, IsWindowVisible,
+        GA_ROOT,
+    };
+
+    thread_local! {
+        static ACC: std::cell::RefCell<Vec<WindowInfo>> = std::cell::RefCell::new(Vec::new());
+    }
+
+    unsafe extern "system" fn cb(hwnd: HWND, _: LPARAM) -> BOOL {
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool() {
+                return BOOL(1);
+            }
+            let root = GetAncestor(hwnd, GA_ROOT);
+            if root != hwnd {
+                return BOOL(1);
+            }
+            let mut buf = [0u16; 512];
+            let n = GetWindowTextW(hwnd, &mut buf);
+            let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]).trim().to_string();
+            if title.is_empty() {
+                return BOOL(1);
+            }
+            let mut r = RECT::default();
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r);
+            if r.right - r.left < 100 || r.bottom - r.top < 50 {
+                return BOOL(1);
+            }
+            // get_process_name 内部已调 GetWindowThreadProcessId，这里不重复
+            let process = get_process_name(hwnd);
+            let topmost = is_topmost(hwnd);
+            ACC.with(|acc| {
+                acc.borrow_mut().push(WindowInfo {
+                    hwnd: hwnd.0 as isize,
+                    title,
+                    process,
+                    topmost,
+                });
+            });
+            BOOL(1)
+        }
+    }
+
+    ACC.with(|acc| acc.borrow_mut().clear());
+    unsafe {
+        let _ = EnumWindows(Some(cb), LPARAM(0));
+    }
+    ACC.with(|acc| (*acc.borrow()).clone())
+}
+
+/// 窗口信息（托盘二级菜单用）
+#[derive(Clone)]
+pub struct WindowInfo {
+    pub hwnd: isize,
+    pub title: String,
+    pub process: String,
+    pub topmost: bool,
 }
 
 
