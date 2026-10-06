@@ -1,6 +1,6 @@
 [package]
 name = "winsnap"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "窗口位置和大小管理工具 — 自动居中、快捷键交互、规则匹配"
 
@@ -8,7 +8,7 @@ description = "窗口位置和大小管理工具 — 自动居中、快捷键交
 winres = "0.1"
 
 [dependencies]
-color = { path = "../_shared" }
+color = { path = "./_shared" }
 rdev = "0.5"
 winreg = "0.52"
 windows = { version = "0.58", features = [

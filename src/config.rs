@@ -431,4 +431,37 @@ pub fn get_root_window(hwnd: HWND) -> HWND {
     }
 }
 
+// ── 窗口置顶（Alt+T / --cmd topmost） ──
+//
+// 复用 window_responding 探测目标线程是否响应（避免挂起时 SetWindowPos 阻塞）
+// 与 move_window_to / set_window_pos 一致；is_topmost 不阻塞所以不需要探测。
+
+/// 判断窗口是否置顶（基于 WS_EX_TOPMOST 扩展样式）
+pub fn is_topmost(hwnd: HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TOPMOST,
+    };
+    unsafe {
+        (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0
+    }
+}
+
+/// 设置窗口置顶（on=true）/取消置顶（on=false）；目标线程挂起时返回 false 跳过
+pub fn set_topmost(hwnd: HWND, on: bool) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    if !window_responding(hwnd, 100) {
+        return false;
+    }
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            if on { HWND_TOPMOST } else { HWND_NOTOPMOST },
+            0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE,
+        ).is_ok()
+    }
+}
+
 

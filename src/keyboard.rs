@@ -96,6 +96,7 @@ fn on_keypress(key: Key, _modifiers: &Arc<Mutex<HashSet<Key>>>) {
                 Key::RightArrow => snap_to_edge(hwnd, 1),
                 Key::UpArrow => snap_to_edge(hwnd, 2),
                 Key::DownArrow => snap_to_edge(hwnd, 3),
+                Key::KeyT => toggle_topmost(hwnd),
                 _ => {}
             }
         }
@@ -173,5 +174,22 @@ fn key_to_num(key: Key) -> Option<char> {
         Key::Kp8 => Some('8'),
         Key::Kp9 => Some('9'),
         _ => None,
+    }
+}
+
+// ── Alt+T 切换前台窗口置顶 ──
+
+/// Alt+T 切换当前前台窗口置顶状态（toggle 语义）；日志带进程名/标题便于事后追溯
+fn toggle_topmost(hwnd: HWND) {
+    let was = cfg::is_topmost(hwnd);
+    if cfg::set_topmost(hwnd, !was) {
+        let pn = cfg::get_process_name(hwnd);
+        let title = cfg::get_window_title(hwnd);
+        let state = if !was { c("已置顶", CLR_SUCCESS) } else { c("取消置顶", CLR_PAUSE) };
+        println!("[{}] {} Alt+T 切换置顶: {} [{}] → {}",
+            now(), c("[TOPMOST]", CLR_INTERACT),
+            c(&format!("[{pn}]"), CLR_POSITION), title, state);
+    } else {
+        eprintln!("[{}] Alt+T 切换置顶失败：目标窗口未响应", now());
     }
 }

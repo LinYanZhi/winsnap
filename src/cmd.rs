@@ -4,6 +4,7 @@
 //!   winsnap --cmd snap --pid <n>|--title <s> --align left|right|center|full|left-edge|right-edge|proportional [--scale N] [--gap N]
 //!   winsnap --cmd list [--pid N] [--title S] [--top N]
 //!   winsnap --cmd screen
+//!   winsnap --cmd topmost --hwnd <hex>|--pid <n>|--title <s> [--action toggle|on|off]
 //! 输出：stdout JSON。D:\ 无关——由 main.rs 在 --cmd 时 attach 父控制台。
 
 use std::cell::RefCell;
@@ -132,6 +133,12 @@ pub fn run(args: &[String]) -> i32 {
     let scale = args.iter().position(|a| a == "--scale").and_then(|i| args.get(i + 1)).and_then(|s| s.parse::<f64>().ok()).unwrap_or(-1.0);
     let gap = args.iter().position(|a| a == "--gap").and_then(|i| args.get(i + 1)).and_then(|s| s.parse::<i32>().ok()).unwrap_or(8);
     let top = args.iter().position(|a| a == "--top").and_then(|i| args.get(i + 1)).and_then(|s| s.parse::<usize>().ok()).unwrap_or(100);
+    // --hwnd 优先：直接拿句柄（list 命令 JSON 输出含 hwnd 十六进制，AI 工作流 list→topmost 两步）
+    let hwnd = args.iter().position(|a| a == "--hwnd").and_then(|i| args.get(i + 1)).and_then(|s| {
+        let s = s.trim_start_matches("0x").trim_start_matches("0X");
+        u64::from_str_radix(s, 16).ok()
+    });
+    let action = args.iter().position(|a| a == "--action").and_then(|i| args.get(i + 1)).map(|s| s.as_str()).unwrap_or("toggle");
 
     match sub {
         "screen" => {
@@ -189,8 +196,34 @@ pub fn run(args: &[String]) -> i32 {
             println!("{{\"hwnd\":\"{:X}\",\"pid\":{},\"restored\":true}}", w.hwnd, w.pid);
             0
         }
+        "topmost" => {
+            // --hwnd 直接拿句柄；否则复用 find_window 按 pid/title 找
+            let ptr = if let Some(h) = hwnd {
+                h as isize as *mut core::ffi::c_void
+            } else {
+                match find_window(pid, title) {
+                    Some(w) => w.hwnd as *mut core::ffi::c_void,
+                    None => { eprintln!("window not found (hwnd={hwnd:?} pid={pid:?} title={title:?})"); return 2; }
+                }
+            };
+            let hwnd = HWND(ptr);
+            let currently = cfg::is_topmost(hwnd);
+            // --action 缺省或非法值均视为 toggle：与"快捷键 Alt+T"语义一致
+            let target = match action {
+                "on" => true,
+                "off" => false,
+                _ => !currently,
+            };
+            let ok = cfg::set_topmost(hwnd, target);
+            let final_state = cfg::is_topmost(hwnd);
+            let title_s = cfg::get_window_title(hwnd);
+            println!("{{\"hwnd\":\"{:X}\",\"title\":{},\"topmost\":{},\"action\":\"{}\",\"ok\":{ok}}}",
+                ptr as isize, serde_json_title(&title_s), final_state,
+                if target == final_state { action } else { "noop" });
+            if ok { 0 } else { 3 }
+        }
         _ => {
-            eprintln!("usage: winsnap --cmd snap|list|screen ...");
+            eprintln!("usage: winsnap --cmd snap|list|screen|restore|topmost ...");
             1
         }
     }

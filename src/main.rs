@@ -140,6 +140,7 @@ fn main() {
         println!("  Alt + 小键盘数字键：{}", c("快速定位", CLR_POSITION));
         println!("  Alt + 滚轮：{}", c("等比例缩放", CLR_SCALE));
         println!("  Alt + 方向键：{}", c("快速贴边", CLR_POSITION));
+        println!("  Alt + T：{}", c("切换前台窗口置顶", CLR_INTERACT));
         println!("  Alt + 鼠标左键拖拽：{}", c("移动窗口", CLR_POSITION));
         println!("  Alt + 鼠标右键拖拽：{}", c("调整窗口大小", CLR_SCALE));
         println!("{} 输入 ` 可暂停/恢复快捷键和鼠标监听", c("提示：", CLR_TIP));
